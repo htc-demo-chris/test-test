@@ -1,0 +1,77 @@
+name: Deploy Test-test
+
+on:
+  push:
+    branches: main
+
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: true
+env:
+
+  IMAGE: test-test
+  ACR_SERVER_NAME: ${{ vars.ACR_SERVER_NAME }}
+
+  SCORE_HUMANITEC_VERSION: '0.8.0'
+  APP_NAME: test-test
+
+
+jobs:
+  deploy:
+    name: Build & Notify Humanitec
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set Tag with SHA
+        run: echo "TAG=`echo $GITHUB_SHA | cut -c 1-7`" >> $GITHUB_ENV
+
+      - name: login to azure acr
+        run: |
+          echo "${{ secrets.ACR_PUSH_SP_PASSWORD }}" | docker login \
+            ${{ vars.ACR_SERVER_NAME }} \
+            -u ${{ vars.ACR_PUSH_SP_ID }} \
+            --password-stdin
+          echo "CONTAINER_REGISTRY=${{ env.ACR_SERVER_NAME }}" >> "$GITHUB_ENV"
+
+
+
+      - run: docker build --platform linux/amd64 . -t $CONTAINER_REGISTRY/$IMAGE:$TAG
+      - run: docker push $CONTAINER_REGISTRY/$IMAGE:$TAG
+
+      - name: Inform Humanitec
+        run: |-
+          curl \
+            --request POST 'https://api.humanitec.io/orgs/${{ vars.HUMANITEC_ORG_ID }}/artefact-versions' \
+            --header 'Authorization: Bearer ${{ secrets.HUMANITEC_TOKEN }}' \
+            --header 'Content-Type: application/json' \
+            --data-raw '{
+                "name": "'$CONTAINER_REGISTRY/$IMAGE'",
+                "version": "'$TAG'",
+                "type": "container",
+                "commit": "'$GITHUB_SHA'",
+                "ref": "'$GITHUB_REF'"
+            }'
+
+      - uses: score-spec/setup-score@v2
+        with:
+          file: score-humanitec
+          version: ${{ env.SCORE_HUMANITEC_VERSION }}
+
+      - name: Deploy using Score
+        run: |
+          score-humanitec delta \
+            --retry \
+            --deploy \
+            --token ${{ secrets.HUMANITEC_TOKEN }} \
+            --org ${{ vars.HUMANITEC_ORG_ID }} \
+            --app ${{ env.APP_NAME }} \
+            --env development \
+            -f score.yaml \
+            --extensions humanitec.score.yaml \
+            --workload-source-url "https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/score.yaml" \
+            --property containers.frontend.image=$CONTAINER_REGISTRY/$IMAGE:$TAG \
+            --message "${{ github.event.head_commit.message }}"
+
